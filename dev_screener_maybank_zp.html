@@ -1,0 +1,597 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Screener & Simulator Maybank (ZP) Pro</title>
+    
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #0f172a; 
+            color: #f8fafc; 
+            margin: 0;
+        }
+        .custom-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
+        .custom-scroll::-webkit-scrollbar-track { background: #1e293b; border-radius: 4px; }
+        .custom-scroll::-webkit-scrollbar-thumb { background: #475569; border-radius: 4px; }
+        .custom-scroll::-webkit-scrollbar-thumb:hover { background: #64748b; }
+        
+        .card-hover-effect {
+            transition: all 0.2s ease-in-out;
+        }
+        .card-hover-effect:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3);
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        // Helper Endpoint Universal (Vercel, Render, DevTunnels, & Local)
+        const getProxyEndpoint = (port, path) => {
+            const hostname = window.location.hostname;
+            
+            // 1. Production Cloud (Vercel, Render, dll) -> Gunakan Relative Path HTTPS
+            if (hostname.includes('vercel.app') || hostname.includes('onrender.com') || (hostname !== 'localhost' && hostname !== '127.0.0.1' && !hostname.includes('devtunnels.ms'))) {
+                return path; 
+            }
+            
+            // 2. VS Code Dev Tunnels
+            if (hostname.includes('devtunnels.ms')) {
+                if (hostname.includes(`-${port}.`)) return path;
+                const proxyHost = hostname.replace(/-\d+/, `-${port}`);
+                return `https://${proxyHost}${path}`;
+            }
+            
+            // 3. Testing Lokal Laptop
+            if (window.location.port === String(port)) return path;
+            return `http://localhost:${port}${path}`;
+        };
+
+        const { useState, useMemo, useEffect } = React;
+
+        const WARRANTS_DATA = [
+            { code: 'ADROMBCE4A', issuer: 'Maybank', underlying: 'ADRO', uPrice: 2800, strike: 3000, ratio: 5, daysToMaturity: 60, delta: 45.0, theta: -12.5, premium: 14.0, effGearing: 4.5, sensitivity: 1.2, bid: 15, type: 'CALL' },
+            { code: 'BBCAZPCG4A', issuer: 'Maybank', underlying: 'BBCA', uPrice: 9800, strike: 9500, ratio: 10, daysToMaturity: 45, delta: 65.0, theta: -8.5, premium: 4.0, effGearing: 3.2, sensitivity: 0.8, bid: 45, type: 'CALL' }
+        ];
+
+        const formatIDR = (num) => new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', minimumFractionDigits: 0, maximumFractionDigits: 2 }).format(num);
+        const formatPct = (num) => `${(num).toFixed(2)}%`;
+        const formatDec = (num) => (num).toFixed(2);
+
+        const enrichWarrantData = (w) => {
+            let moneynessRatio = 1;
+            if (w.strike > 0) {
+                moneynessRatio = w.uPrice / w.strike;
+            }
+            
+            let status = 'ATM';
+            if (moneynessRatio > 1.02) status = 'ITM';
+            else if (moneynessRatio < 0.98) status = 'OTM';
+
+            const theoreticPrice = w.ratio > 0 ? Math.max(0, (w.uPrice * (w.premium / 100 + 1) - w.strike) / w.ratio) : 0;
+            const intrinsic = w.ratio > 0 ? Math.max(0, w.uPrice - w.strike) / w.ratio : 0;
+            const timeValue = Math.max(0, theoreticPrice - intrinsic);
+
+            return { ...w, moneynessRatio, status, theoreticPrice, intrinsic, timeValue };
+        };
+
+        const mapMaybankData = (rawArray) => {
+            const list = Array.isArray(rawArray) ? rawArray : (rawArray.data || []);
+            return list.map(item => {
+                const cleanNum = (val) => {
+                    if (typeof val === 'number') return val;
+                    if (!val) return 0;
+                    return parseFloat(String(val).replace(/,/g, '')) || 0;
+                };
+
+                return {
+                    code: item.ric || item.dwSymbol || 'UNKNOWN',
+                    issuer: item.issuer || 'MSI',
+                    underlying: item.underlyingSymbol || 'Unknown', 
+                    uPrice: cleanNum(item.underlying_price),
+                    strike: cleanNum(item.exercisePrice),
+                    ratio: cleanNum(item.conv_ratio),
+                    daysToMaturity: parseInt(item.TimeToMaturity) || 0,
+                    delta: cleanNum(item.delta),
+                    theta: cleanNum(item.theta),
+                    premium: cleanNum(item.premium),
+                    effGearing: cleanNum(item.effectiveGearing),
+                    sensitivity: cleanNum(item.sensitivity),
+                    bid: cleanNum(item.bidPrice),
+                    type: item.type || 'CALL'
+                };
+            }).filter(w => w.code !== 'UNKNOWN');
+        };
+
+        const Badge = ({ children, variant }) => {
+            const styles = {
+                ITM: "bg-green-900/40 text-green-400 border border-green-700",
+                ATM: "bg-yellow-900/40 text-yellow-400 border border-yellow-700",
+                OTM: "bg-red-900/40 text-red-400 border border-red-700",
+                default: "bg-slate-700 text-slate-300"
+            };
+            return (
+                <span className={`px-2 py-0.5 rounded-full text-[10px] sm:text-xs font-semibold ${styles[variant] || styles.default}`}>
+                    {children}
+                </span>
+            );
+        };
+
+        const Screener = ({ data, onSelect, selectedCode }) => {
+            const [statusFilter, setStatusFilter] = useState('ALL');
+            const [autoFilter, setAutoFilter] = useState('ALL');
+            const [sortConfig, setSortConfig] = useState({ key: 'delta', direction: 'desc' });
+
+            const handleSort = (key) => {
+                let direction = 'desc';
+                if (sortConfig.key === key && sortConfig.direction === 'desc') {
+                    direction = 'asc';
+                }
+                setSortConfig({ key, direction });
+            };
+
+            const sortedData = useMemo(() => {
+                let filtered = data.filter(w => {
+                    if (statusFilter !== 'ALL' && w.status !== statusFilter) return false;
+
+                    if (autoFilter === 'LOW_RISK') {
+                        return (w.status === 'ITM' || w.status === 'ATM') && w.daysToMaturity > 30 && w.premium <= 15;
+                    }
+                    if (autoFilter === 'HIGH_RETURN') {
+                        return w.effGearing >= 4 && w.sensitivity >= 0.5 && w.daysToMaturity > 15;
+                    }
+                    if (autoFilter === 'HIGH_RISK') {
+                        return w.status === 'OTM' && w.daysToMaturity <= 30 && w.sensitivity < 15;
+                    }
+                    if (autoFilter === 'SWING') {
+                        return w.daysToMaturity > 90;
+                    }
+                    return true;
+                });
+                
+                filtered.sort((a, b) => {
+                    let aVal = a[sortConfig.key];
+                    let bVal = b[sortConfig.key];
+                    
+                    const isInvalidA = aVal === 0 || Number.isNaN(aVal) || aVal === null || aVal === undefined;
+                    const isInvalidB = bVal === 0 || Number.isNaN(bVal) || bVal === null || bVal === undefined;
+
+                    if (isInvalidA && !isInvalidB) return 1;  
+                    if (!isInvalidA && isInvalidB) return -1; 
+                    if (isInvalidA && isInvalidB) return 0;   
+
+                    if (typeof aVal === 'string') {
+                        aVal = aVal.toLowerCase();
+                        bVal = bVal.toLowerCase();
+                    }
+
+                    if (aVal < bVal) return sortConfig.direction === 'asc' ? -1 : 1;
+                    if (aVal > bVal) return sortConfig.direction === 'asc' ? 1 : -1;
+                    return 0;
+                });
+                
+                return filtered;
+            }, [data, statusFilter, autoFilter, sortConfig]);
+
+            const SortIcon = ({ columnKey }) => {
+                if (sortConfig.key !== columnKey) return <span className="opacity-30 text-[9px] ml-1">↕</span>;
+                return <span className="text-yellow-400 text-[10px] ml-1">{sortConfig.direction === 'asc' ? '▲' : '▼'}</span>;
+            };
+
+            const autoFilterConfigs = [
+                { id: 'ALL', label: 'Semua', icon: '📋', desc: 'Semua Data', color: 'slate' },
+                { id: 'LOW_RISK', label: 'Low Risk', icon: '🛡️', desc: 'ITM/ATM, >30h', color: 'green' },
+                { id: 'SWING', label: 'Swing', icon: '🏄', desc: 'Tempo > 90 Hari', color: 'purple' },
+                { id: 'HIGH_RETURN', label: 'High Potential', icon: '🚀', desc: 'Gearing >4x', color: 'amber' },
+                { id: 'HIGH_RISK', label: 'High Risk', icon: '⚠️', desc: 'OTM, <30h', color: 'red' }
+            ];
+
+            return (
+                <div className="bg-slate-800 rounded-xl border border-slate-700 p-3 sm:p-4 shadow-xl flex flex-col lg:h-full min-h-0">
+                    <div className="flex flex-wrap justify-between items-center mb-3 sm:mb-4 gap-2 shrink-0">
+                        <h2 className="text-base sm:text-lg font-bold text-slate-100 flex items-center gap-2">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-yellow-400"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
+                            Maybank (ZP) Screener
+                        </h2>
+                        
+                        <div className="flex gap-1 bg-slate-900/50 p-1 rounded-lg border border-slate-700/50">
+                            {['ALL', 'ITM', 'ATM', 'OTM'].map(f => (
+                                <button
+                                    key={f}
+                                    onClick={() => setStatusFilter(f)}
+                                    className={`px-2.5 py-1 text-[11px] sm:text-xs rounded font-medium transition-colors ${
+                                        statusFilter === f ? 'bg-amber-600 text-white' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-700'
+                                    }`}
+                                >
+                                    {f}
+                                </button>
+                            ))}
+                        </div>
+                    </div>
+
+                    <div className="flex lg:grid lg:grid-cols-5 gap-2 mb-3 sm:mb-4 shrink-0 overflow-x-auto pb-2 lg:pb-0 custom-scroll">
+                        {autoFilterConfigs.map(config => {
+                            const isActive = autoFilter === config.id;
+                            
+                            const count = data.filter(w => {
+                                if (config.id === 'ALL') return true;
+                                if (config.id === 'LOW_RISK') return (w.status === 'ITM' || w.status === 'ATM') && w.daysToMaturity > 30 && w.premium <= 15;
+                                if (config.id === 'SWING') return w.daysToMaturity > 90;
+                                if (config.id === 'HIGH_RETURN') return w.effGearing >= 4 && w.sensitivity >= 0.5 && w.daysToMaturity > 15;
+                                if (config.id === 'HIGH_RISK') return w.status === 'OTM' && w.daysToMaturity <= 30 && w.sensitivity < 15;
+                            }).length;
+
+                            const colorClasses = {
+                                slate: isActive ? 'bg-slate-700 border-slate-500' : 'bg-slate-900/40 border-slate-700',
+                                green: isActive ? 'bg-green-900/60 border-green-500' : 'bg-slate-900/40 border-slate-700',
+                                amber: isActive ? 'bg-amber-900/60 border-amber-500' : 'bg-slate-900/40 border-slate-700',
+                                purple: isActive ? 'bg-purple-900/60 border-purple-500' : 'bg-slate-900/40 border-slate-700',
+                                red:   isActive ? 'bg-red-900/60 border-red-500' : 'bg-slate-900/40 border-slate-700',
+                            };
+
+                            const textClasses = {
+                                slate: isActive ? 'text-slate-200' : 'text-slate-400',
+                                green: isActive ? 'text-green-300' : 'text-slate-400',
+                                amber: isActive ? 'text-amber-300' : 'text-slate-400',
+                                purple: isActive ? 'text-purple-300' : 'text-slate-400',
+                                red:   isActive ? 'text-red-300' : 'text-slate-400',
+                            };
+
+                            return (
+                                <button 
+                                    key={config.id}
+                                    onClick={() => setAutoFilter(config.id)}
+                                    className={`min-w-[125px] sm:min-w-[140px] lg:min-w-0 flex-1 card-hover-effect rounded-lg p-2 sm:p-2.5 border text-left flex flex-col justify-between transition-colors shrink-0 ${colorClasses[config.color]}`}
+                                >
+                                    <div className="flex justify-between items-start mb-1 gap-1">
+                                        <span className={`text-xs sm:text-sm font-bold flex items-center gap-1 ${textClasses[config.color]}`}>
+                                            <span>{config.icon}</span> {config.label}
+                                        </span>
+                                        <span className={`text-[9px] sm:text-[10px] font-bold px-1.5 py-0.2 rounded-full ${isActive ? 'bg-black/40' : 'bg-slate-800 text-slate-400'}`}>
+                                            {count}
+                                        </span>
+                                    </div>
+                                    <span className="text-[9px] text-slate-500 leading-tight block truncate">{config.desc}</span>
+                                </button>
+                            );
+                        })}
+                    </div>
+                    
+                    <div className="custom-scroll border border-slate-700 rounded-lg overflow-x-auto overflow-y-auto max-h-[60vh] lg:max-h-none lg:flex-1">
+                        <table className="w-full text-xs text-left whitespace-nowrap">
+                            <thead className="text-[10px] uppercase text-slate-400 bg-slate-900/90 sticky top-0 z-10 backdrop-blur-sm select-none">
+                                <tr>
+                                    <th className="px-3 py-3 font-semibold cursor-pointer hover:text-slate-200" onClick={() => handleSort('code')}>Kode <SortIcon columnKey="code" /></th>
+                                    <th className="px-3 py-3 font-semibold cursor-pointer hover:text-slate-200" onClick={() => handleSort('underlying')}>Induk <SortIcon columnKey="underlying" /></th>
+                                    <th className="px-3 py-3 font-semibold text-right cursor-pointer hover:text-slate-200" onClick={() => handleSort('bid')}>BID <SortIcon columnKey="bid" /></th>
+                                    <th className="px-3 py-3 font-semibold text-right cursor-pointer hover:text-slate-200" onClick={() => handleSort('uPrice')}>Hrg. Induk <SortIcon columnKey="uPrice" /></th>
+                                    <th className="px-3 py-3 font-semibold text-right cursor-pointer hover:text-slate-200" onClick={() => handleSort('strike')}>Strike <SortIcon columnKey="strike" /></th>
+                                    <th className="px-3 py-3 font-semibold text-center cursor-pointer hover:text-slate-200" onClick={() => handleSort('status')}>Status <SortIcon columnKey="status" /></th>
+                                    <th className="px-3 py-3 font-semibold text-right cursor-pointer hover:text-slate-200" onClick={() => handleSort('premium')}>Premi <SortIcon columnKey="premium" /></th>
+                                    <th className="px-3 py-3 font-semibold text-right cursor-pointer hover:text-slate-200" onClick={() => handleSort('effGearing')}>Gearing <SortIcon columnKey="effGearing" /></th>
+                                    <th className="px-3 py-3 font-semibold text-right cursor-pointer hover:text-slate-200" onClick={() => handleSort('sensitivity')}>Sens <SortIcon columnKey="sensitivity" /></th>
+                                    <th className="px-3 py-3 font-semibold text-right cursor-pointer hover:text-slate-200" onClick={() => handleSort('theta')}>Theta <SortIcon columnKey="theta" /></th>
+                                    <th className="px-3 py-3 font-semibold text-right cursor-pointer hover:text-slate-200" onClick={() => handleSort('delta')}>Delta <SortIcon columnKey="delta" /></th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {sortedData.map((row) => (
+                                    <tr 
+                                        key={row.code} 
+                                        onClick={() => onSelect(row)}
+                                        className={`border-b border-slate-700/50 cursor-pointer transition-colors hover:bg-slate-700/50 ${
+                                            selectedCode === row.code ? 'bg-amber-900/30 border-l-4 border-l-yellow-500' : 'border-l-4 border-l-transparent'
+                                        }`}
+                                    >
+                                        <td className="px-3 py-2.5 font-bold text-yellow-400">{row.code}</td>
+                                        <td className="px-3 py-2.5 font-medium text-slate-200">{row.underlying}</td>
+                                        <td className="px-3 py-2.5 text-right font-bold text-yellow-300">{formatIDR(row.bid)}</td>
+                                        <td className="px-3 py-2.5 text-right text-slate-200">{formatIDR(row.uPrice)}</td>
+                                        <td className="px-3 py-2.5 text-right text-slate-400">{formatIDR(row.strike)}</td>
+                                        <td className="px-3 py-2.5 text-center"><Badge variant={row.status}>{row.status}</Badge></td>
+                                        <td className="px-3 py-2.5 text-right text-slate-300">{formatDec(row.premium)}%</td>
+                                        <td className="px-3 py-2.5 text-right text-slate-300">{formatDec(row.effGearing)}x</td>
+                                        <td className="px-3 py-2.5 text-right text-slate-300">{formatDec(row.sensitivity)}</td>
+                                        <td className="px-3 py-2.5 text-right text-red-400 font-medium">{formatDec(row.theta)}</td>
+                                        <td className="px-3 py-2.5 text-right text-green-400 font-medium">{formatDec(row.delta)}%</td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                        {sortedData.length === 0 && (
+                            <div className="text-center py-10 flex flex-col items-center justify-center text-slate-500">
+                                <span className="text-sm font-medium">Tidak ada waran Maybank yang memenuhi kriteria.</span>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            );
+        };
+
+        const Simulator = ({ warrant }) => {
+            const [uPriceChangePct, setUPriceChangePct] = useState(0);
+            const [daysPassed, setDaysPassed] = useState(0);
+
+            useEffect(() => {
+                setUPriceChangePct(0);
+                setDaysPassed(0);
+            }, [warrant.code]);
+
+            const sim = useMemo(() => {
+                const currentUPrice = warrant.uPrice;
+                const newUPrice = currentUPrice * (1 + (uPriceChangePct / 100));
+                
+                const uPriceDiff = newUPrice - currentUPrice;
+                const deltaImpact = (uPriceDiff * (warrant.delta / 100)) / warrant.ratio;
+                const thetaImpact = daysPassed * (warrant.theta / warrant.ratio);
+
+                const basePrice = warrant.bid > 0 ? warrant.bid : warrant.theoreticPrice;
+                const estimatedPrice = Math.max(1, basePrice + deltaImpact + thetaImpact); 
+                const pnlPct = basePrice > 0 ? ((estimatedPrice - basePrice) / basePrice) * 100 : 0;
+
+                const chartData = [
+                    { name: 'Hrg. Awal', nilai: basePrice, fill: '#64748b' },
+                    { name: 'Efek Delta', nilai: deltaImpact, fill: deltaImpact >= 0 ? '#22c55e' : '#ef4444' },
+                    { name: 'Efek Theta', nilai: thetaImpact, fill: '#ef4444' },
+                    { name: 'Estimasi', nilai: estimatedPrice, fill: estimatedPrice > basePrice ? '#f59e0b' : '#3b82f6' }
+                ];
+
+                return { newUPrice, deltaImpact, thetaImpact, estimatedPrice, pnlPct, chartData, basePrice };
+            }, [warrant, uPriceChangePct, daysPassed]);
+
+            return (
+                <div className="bg-slate-800 rounded-xl border border-slate-700 p-4 shadow-xl flex flex-col h-full min-h-0 relative overflow-hidden">
+                    <div className="flex justify-between items-start mb-4 shrink-0">
+                        <div>
+                            <h2 className="text-xl font-bold text-white leading-tight">{warrant.code}</h2>
+                            <div className="text-slate-400 text-xs mt-0.5 font-medium flex items-center gap-2">
+                                <span className="bg-yellow-900/50 text-yellow-400 px-1.5 py-0.5 rounded text-[10px] border border-yellow-700/50">{warrant.issuer}</span>
+                                <span>Induk: <span className="text-slate-200">{warrant.underlying}</span></span>
+                                <span>•</span>
+                                <span>BID: <span className="text-yellow-400">{formatIDR(warrant.bid)}</span></span>
+                            </div>
+                        </div>
+                        <Badge variant={warrant.status}>{warrant.status}</Badge>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3 mb-4 text-xs shrink-0">
+                        <div className="bg-slate-900/50 p-2.5 rounded-lg border border-slate-700/50 text-center">
+                            <span className="text-slate-400 block mb-1">Rasio Konversi</span>
+                            <span className="font-semibold text-slate-200">{warrant.ratio} : 1</span>
+                        </div>
+                        <div className="bg-slate-900/50 p-2.5 rounded-lg border border-slate-700/50 text-center">
+                            <span className="text-slate-400 block mb-1">Sisa Waktu</span>
+                            <span className="font-semibold text-slate-200">{warrant.daysToMaturity} Hari</span>
+                        </div>
+                    </div>
+
+                    <div className="space-y-4 mb-4 shrink-0">
+                        <div>
+                            <div className="flex justify-between mb-1.5">
+                                <label className="text-xs font-medium text-slate-300">Simulasi Harga Induk</label>
+                                <span className={`text-xs font-bold ${uPriceChangePct > 0 ? 'text-green-400' : uPriceChangePct < 0 ? 'text-red-400' : 'text-slate-300'}`}>
+                                    {uPriceChangePct > 0 ? '+' : ''}{uPriceChangePct}%
+                                </span>
+                            </div>
+                            <input 
+                                type="range" min="-15" max="15" step="1" 
+                                value={uPriceChangePct} 
+                                onChange={(e) => setUPriceChangePct(Number(e.target.value))}
+                                className="w-full accent-yellow-500 h-1.5 bg-slate-700 rounded-lg appearance-none cursor-pointer"
+                            />
+                            <div className="text-[10px] text-slate-500 mt-1 flex justify-between font-medium">
+                                <span>{formatIDR(warrant.uPrice)}</span>
+                                <span className="text-yellow-300">Jadi: {formatIDR(sim.newUPrice)}</span>
+                            </div>
+                        </div>
+
+                        <div>
+                            <div className="flex justify-between mb-1.5">
+                                <label className="text-xs font-medium text-slate-300">Waktu Ditahan (Time Decay)</label>
+                                <span className="text-xs font-bold text-slate-300">{daysPassed} Hari</span>
+                            </div>
+                            <input 
+                                type="range" min="0" max={warrant.daysToMaturity} step="1" 
+                                value={daysPassed} 
+                                onChange={(e) => setDaysPassed(Number(e.target.value))}
+                                className="w-full accent-red-500 h-1.5 bg-slate-700 rounded-lg appearance-none cursor-pointer"
+                            />
+                        </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3 mb-4 shrink-0">
+                        <div className="bg-slate-900/50 p-3 rounded-lg border border-slate-700/50 text-center">
+                            <div className="text-[10px] text-slate-400 mb-1">Estimasi Harga Baru</div>
+                            <div className="text-lg sm:text-xl font-bold text-white">{formatIDR(sim.estimatedPrice)}</div>
+                        </div>
+                        <div className={`p-3 rounded-lg border text-center ${sim.pnlPct >= 0 ? 'bg-green-900/20 border-green-800/50' : 'bg-red-900/20 border-red-800/50'}`}>
+                            <div className="text-[10px] text-slate-400 mb-1">Potensi PnL Waran</div>
+                            <div className={`text-lg sm:text-xl font-bold ${sim.pnlPct >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                                {formatPct(sim.pnlPct)}
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="flex-1 min-h-[120px] bg-slate-900/30 rounded-lg p-3 flex flex-col justify-end mt-auto">
+                        <div className="flex justify-between items-end h-[80%] gap-2 w-full">
+                            {sim.chartData.map((entry, index) => {
+                                const maxVal = Math.max(...sim.chartData.map(d => Math.abs(d.nilai)), 1);
+                                const heightPct = Math.max((Math.abs(entry.nilai) / maxVal) * 100, 2); 
+                                
+                                return (
+                                    <div key={index} className="flex flex-col items-center flex-1 h-full justify-end group">
+                                        <div className="text-[9px] sm:text-[10px] text-slate-300 mb-1.5 font-medium whitespace-nowrap">
+                                            {entry.nilai > 0 && index !== 0 && index !== 3 ? '+' : ''}{formatIDR(entry.nilai)}
+                                        </div>
+                                        <div 
+                                            className="w-full max-w-[32px] rounded-t-sm transition-all duration-300 opacity-90 group-hover:opacity-100"
+                                            style={{ height: `${heightPct}%`, backgroundColor: entry.fill }}
+                                        ></div>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                        <div className="flex justify-between items-start mt-2 gap-1 border-t border-slate-700/50 pt-1.5">
+                            {sim.chartData.map((entry, index) => (
+                                <div key={`label-${index}`} className="flex-1 text-center text-[9px] sm:text-[10px] text-slate-400 font-medium leading-tight">
+                                    {entry.name}
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const App = () => {
+            const [marketData, setMarketData] = useState(WARRANTS_DATA);
+            const [isLive, setIsLive] = useState(false);
+            const [isLoading, setIsLoading] = useState(false);
+            const [syncMessage, setSyncMessage] = useState(null);
+
+            const enrichedData = useMemo(() => marketData.map(enrichWarrantData), [marketData]);
+            const [selectedWarrantCode, setSelectedWarrantCode] = useState(enrichedData[0]?.code || null);
+            
+            const selectedWarrant = useMemo(() => {
+                if (enrichedData.length === 0) return null;
+                return enrichedData.find(w => w.code === selectedWarrantCode) || enrichedData[0];
+            }, [enrichedData, selectedWarrantCode]);
+
+            const handleSelectWarrant = (code) => {
+                setSelectedWarrantCode(code);
+                if (window.innerWidth < 1024) {
+                    const simElement = document.getElementById('simulator-section');
+                    if (simElement) {
+                        simElement.scrollIntoView({ behavior: 'smooth' });
+                    }
+                }
+            };
+
+            useEffect(() => {
+                let interval;
+                if (isLive) {
+                    interval = setInterval(() => {
+                        setMarketData(prev => prev.map(w => {
+                            const changePct = (Math.random() * 3 - 1.5) / 100;
+                            const newUPrice = Math.max(10, Math.round(w.uPrice * (1 + changePct)));
+                            return { ...w, uPrice: newUPrice };
+                        }));
+                    }, 3000);
+                }
+                return () => clearInterval(interval);
+            }, [isLive]);
+
+            const fetchRealData = async () => {
+                setIsLoading(true);
+                setSyncMessage(null);
+                try {
+                    const endpoint = getProxyEndpoint(3002, '/api/maybank');
+                    const response = await fetch(endpoint);
+                    if (!response.ok) throw new Error('Gagal terhubung ke proxy Maybank');
+                    
+                    const textData = await response.text(); 
+                    const rawResponse = JSON.parse(textData); 
+                    const mappedData = mapMaybankData(rawResponse.data);
+                    
+                    setMarketData(mappedData);
+                    if (mappedData.length > 0) setSelectedWarrantCode(mappedData[0].code);
+
+                    setSyncMessage({
+                        type: 'success',
+                        text: `Selesai! ${mappedData.length} waran Maybank (ZP) berhasil dimuat.`
+                    });
+
+                } catch (error) {
+                    setSyncMessage({
+                        type: 'error',
+                        text: 'Gagal memuat data Maybank dari Proxy.'
+                    });
+                } finally {
+                    setIsLoading(false);
+                }
+            };
+
+            return (
+                <div className="min-h-screen lg:h-screen flex flex-col p-3 sm:p-4 md:p-6 mx-auto max-w-[1600px] lg:overflow-hidden">
+                    <header className="mb-3 sm:mb-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shrink-0">
+                        <div>
+                            <h1 className="text-xl sm:text-2xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-yellow-400 to-amber-200 flex items-center gap-2">
+                                ZP Analytics Pro + Auto Screener
+                                {isLive && (
+                                    <span className="flex h-2.5 w-2.5 relative">
+                                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
+                                        <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-red-500"></span>
+                                    </span>
+                                )}
+                            </h1>
+                            <p className="text-slate-400 text-[11px] sm:text-xs mt-0.5">Filter dan simulasi sensitivitas waran Maybank (ZP).</p>
+                        </div>
+                        <div className="flex flex-wrap gap-2 items-center w-full sm:w-auto justify-between sm:justify-start">
+                            <div className="bg-slate-800 border border-slate-700 px-2.5 py-1 rounded-lg flex items-center gap-1.5 shadow-sm">
+                                <span className="text-xs font-bold text-slate-200">{enrichedData.length} <span className="font-medium text-slate-400">Waran</span></span>
+                            </div>
+
+                            <div className="flex gap-2">
+                                <button 
+                                    onClick={() => setIsLive(!isLive)}
+                                    className={`px-2.5 py-1.5 rounded-lg font-medium text-xs flex items-center gap-1.5 transition-colors ${isLive ? 'bg-red-500/20 text-red-400 border border-red-500/50' : 'bg-slate-800 text-slate-300 border border-slate-700 hover:bg-slate-700'}`}
+                                >
+                                    {isLive ? 'Stop Live' : 'Simulasi Live'}
+                                </button>
+                                <button 
+                                    onClick={fetchRealData}
+                                    disabled={isLoading}
+                                    className="bg-yellow-500 hover:bg-yellow-600 text-slate-900 px-3 py-1.5 rounded-lg font-bold text-xs flex items-center gap-1.5 border border-yellow-400 disabled:opacity-50 transition-colors"
+                                >
+                                    {isLoading ? 'Syncing...' : 'Sync Maybank Data'}
+                                </button>
+                            </div>
+                        </div>
+                    </header>
+
+                    {syncMessage && (
+                        <div className={`mb-3 p-2 rounded-lg border flex items-center gap-2 text-xs shrink-0 ${
+                            syncMessage.type === 'success' ? 'bg-green-900/30 border-green-700 text-green-300' : 
+                            'bg-red-900/30 border-red-700 text-red-300'
+                        }`}>
+                            <span>{syncMessage.text}</span>
+                        </div>
+                    )}
+
+                    <main className="grid grid-cols-1 lg:grid-cols-12 gap-4 sm:gap-5 flex-1 min-h-0 pb-6 lg:pb-0">
+                        <div className="lg:col-span-8 flex flex-col min-h-0">
+                            <Screener 
+                                data={enrichedData} 
+                                onSelect={(w) => handleSelectWarrant(w.code)} 
+                                selectedCode={selectedWarrant?.code} 
+                            />
+                        </div>
+                        <div id="simulator-section" className="lg:col-span-4 flex flex-col min-h-[480px] lg:min-h-0 pt-2 lg:pt-0">
+                            {selectedWarrant ? (
+                                <Simulator warrant={selectedWarrant} />
+                            ) : (
+                                <div className="bg-slate-800 rounded-xl border border-slate-700 p-4 shadow-xl flex flex-col items-center justify-center h-full text-center">
+                                    <p className="text-slate-400 font-medium">Data Waran Kosong</p>
+                                </div>
+                            )}
+                        </div>
+                    </main>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
